@@ -1,0 +1,371 @@
+---
+title: "Wikipedia usage by Spanish professors"
+author: "Sameer Sapre"
+date: "7/10/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Wikipedia is a free online encyclopedia relying on crowd-sourcing and volunteers for editing. While it is a free and fast resource for those hoping for some quick information, it can also come with pitfalls. 
+
+For the same reason that Wikipedia is so fast and publicly available, it can be subject to misinformation. Anyone really can write anything for any subject and while mistakes can be corrected by fellow volunteer editors, mistakes that go unaddressed or at least unaddressed for some time can lead to researchers using incorrect information. For this reason, Wikipedia can be deemed as unreliable and inappropriate in some circumstances.
+
+There is not a consensus on whether Wikipedia should be used in an academic setting. From personal experience, while it can be helpful as a tool to guide research or get a basic understanding of a subject, it may not be best to use it as the sole source of information. Sometimes professors want research papers used, sometimes Wikipedia articles don't contain enough detail or offer all perspectives on a topic that I am looking for. Some professors that I have had have been more enient with its use then others, but again, there is by no means a consensus.
+
+That is what I am trying to address with this analysis. I am going to use data gathered from surveys sent to professors at two spanish universities (Universitat de Oberta de Catalunya and Universitat Fabra). This data contains information related to a professor's demographic information as well as their responses to a questionaire. Using this data, I will try to build a classifier that predicts whether the professor has a positive view of Wikipedia usage by student and faculty or whether they have a negative or neutral point of view.
+
+
+Due to the large number of columns, I will be using Principal Component Analysis to build a new set of continuous predictors for the dataset. Using these principal components I will be able to reduce dimensionality drastically while still keeping a majority of the variation in the data. This is done by finding a new set of axis along which the natural variation in the data is still present, to an extent. This makes it easier for us to visualize our data and reduce the amount of noise in a potential model. There is a tradeoff, however, with how much variation you can keep. Naturally, the more PCs kept in the model the more of the initial variance is present. However, you still want to reduce the amount of dimensions in the data. The goal is find the optimal point where you can keep as mucn as the variance as possible, but reduce the amount of dimensions at the same time.
+
+
+After PCA, we will use those transformed components as features to predict how a professor will feel towards Wikipedia usage. We will use a classifier, but there are many to choose from. Since this is a binary classification problem (two outcomes: 0 or 1), we will be looking at binary classification algorithms (though many can extend to multi-class). Though there are many techniques we can use, this analysis will focus on some of the generative modeling methods: logistic regression, linear discriminant analysis (LDA), quadratic discriminant analysis (QDA), and k-nearest neighbors (kNN).
+
+**Logisitic Regression** is similar to linear regression in that it uses a linear equation to arrive at its estimates and maximum likelihood to produce its coefficients. However, logistic regression is used to estimate probabilites that a sample belongs to a category or class whereas linear regression estimates a continuous output.
+
+**LDA and QDA** are methods that look to estimate the distribution of predictors among different categories. In other words, these methods look to use "predictors" to estimate the distribution, as best as possible, of the categories of the response variable. In our case, the categories are just 0 and 1. We can then apply this to the rest of the data to find the most likely distribution of each test point in order to classify it.
+
+**k-NN** is a method that classifies a data point based on the classes of its "neighbors" or closest points. This algorithm assumes that data points that are close to each other, according to some distance or similarity metric, are likely to belong to the same class. In other words, if an unclassified point is close to a cluster of points that all belong to a certain class, then that point is likely to be classified as that class. An example of this could be predicting whether a student passes a test based on past performance. For example, say we wanted to predict if a student would pass a test based on their performance over the past semester. We might look at how others performed on the test who had similar grades over the semester to make a prediction on the new student's outcome.
+
+The evaluation criteria will include prediction accuracy. That is, what percentage of test samples are classified correctly. However, that is not always the best metric to evaluate classifiers as classes are often imbalanced and the accuracy for one class can be much different than others. For example, if a classifier wanted to classify whether a patient had a certain ailment, and that ailment only occured in 2% of the samples then a simple classifier that always predicted that no ailment was present would have 98% accuracy which sounds good, but may actually be a pretty bad classifier because it was unable to correctly identify positive cases. 
+
+To evaluate how well these classifiers predict each of the two classes we will look at *sensitiviy*, the proportion of times the classifier correctly predicted that the response was *1*, and *specificity*, the proportion of the times the classifier correctly predicted that the response was *0*.
+
+We will see that by the end of the analysis, the LDA classifier does the best job with this particular dataset.
+
+
+## Data
+
+Again, this data comes from surveys completed by university professors from 2 Spanish universities. The data source is the UCI Machine Learning Repository. Here are the dimensions.
+
+```{r}
+wiki = read.csv("wiki4HE.csv", header=T, sep=";", na.strings="?")
+dim(wiki)
+```
+
+As you can see there are 53 columns. The variables included are survey results and demographic information about each professor. The survey results are on the Likert scale meaning that the scores range from 1(strongly disagree/never) to 5(strongly agree/always).
+
+The response variable that we will be trying to predict is actually a combination of responses to the 5 *Use behavior* questions. It is the average response for all 5 questions to create a composite score, also on a scale of 1 to 5. I then take that score and create a binary variable: If the score is greater than 3, than it is considered that the professor uses Wikipedia somewhat often or has a positive view towards its usage by their colleagues and students. If it is less than 3, then they do not carry those positive views and/or do not use it very often in their own work. I came to this cutoff because I wanted the distinction to be clear. If neutral was about a 2.5-3, then all positive cases should be above a composite score of 3.
+
+#### Missing Values
+
+```{r message=FALSE, warning=FALSE}
+library(naniar)
+library(caret)
+library(visdat)
+set.seed(1)
+vis_dat(wiki)
+gg_miss_var(wiki)
+miss_var_summary(wiki)
+# Row-wis
+miss_case_summary(wiki)
+```
+
+*Other Position* and *Other Status* look to have a great deal of missingness which means that we could remove them since they'd only be hindering our efforts.
+
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+nearZeroVar(wiki,saveMetrics = TRUE)
+```
+
+Here we see that both `UOC_Position` and `Other_Position` have large frequency ratios compared to many other potential predictors. Add to that, the large percentage of missing values and both these variables may be candidates to drop completely.
+
+
+```{r}
+wiki %>% dplyr::select(-c(OTHERSTATUS,OTHER_POSITION)) -> wiki
+# Take look at missing data after removing problematic columns
+miss_case_summary(wiki)
+gg_miss_var(wiki)
+miss_var_summary(wiki)
+```
+
+#### Create Score Binary Variable and Final Dataset
+
+Here is where we actually preprocess the data to create a composite "usage" score and then use that to create the binary response variable. In addition, we like to see how many complete cases in the data we can get.
+
+```{r}
+# Remove variables with missing percentage > 10 and the use variables
+wiki %>% select(-c(Vis2,UOC_POSITION,PEU3)) -> wiki
+miss_case_summary(wiki)
+# Create a composite score based on the average of all USE scores
+wiki %>% select(c(Use1,Use2,Use3,Use4,Use5)) %>% rowMeans(na.rm = T) -> score
+wiki$Score = ifelse(score >= 3,yes = 1, no = 0)
+
+wiki %>% select(c(Use1,Use2,Use3,Use4,Use5)) -> use_cases
+wiki %>% select(-c(Use1,Use2,Use3,Use4,Use5)) -> wiki 
+miss_case_table(wiki)
+# looks like we can retain about 69.66% of data if we we use na.omit
+wiki = na.omit(wiki)
+```
+
+It looks like about 71 % of the rows are complete cases. At 649 obeservation, that should work for us. Of course, this is not an exact science, there are probably much better ways to go about addressing missing values, including imputation, but that will be saved for another project.
+
+
+#### Correlation
+
+```{r}
+library(corrplot)
+corr_matrix = cor(wiki)
+corrplot(corr_matrix,order = "hclust",type = "upper")
+```
+
+## Analyses
+
+
+### PCA
+
+```{r}
+# Create split based on the 'Score' variable
+trainIndex = createDataPartition(wiki$Score,p = 0.7, list = FALSE, times = 1)
+# Take out binary variables 
+binary_vars = c("GENDER","PhD","UNIVERSITY","USERWIKI","Score")
+wiki_pca = wiki %>% select(-binary_vars)
+
+
+pca_train = wiki_pca[trainIndex,]
+pca_test = wiki_pca[-trainIndex,]
+pca = prcomp(pca_train, scale = T,center = T)
+summary(pca)
+```
+
+
+```{r}
+variance = (pca$sdev)^2
+pve = variance/sum(variance)
+
+loadings = pca$rotation
+rownames(loadings) = colnames(pca)
+scores = pca$x
+
+
+
+```
+
+#### Scree Plot
+
+```{r}
+par(mfrow= c(1,2))
+barplot(pve, xlab = "PC", ylab = "Proportion of Variance Explained", names.arg = 1:length(pve), las = 1,col = "green")
+abline(h = 1/ncol(wiki), col = "red")
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Cumulative Proportion of Variance Explained", ylim = c(0,1),type = "b")
+
+```
+
+The red line represents the cutoff of what one variable's worth of data should contribute if all variables contribute the same amount of variance. That cutoff happens our PC 12, so we will start out using 12 PCs.
+
+
+#### Variable Importance
+
+Let's see which variables contribute the most to the top 10 PCs.
+
+```{r}
+library(reshape)
+pve.mat = matrix(rep(pve,each = 12), nrow = length(pve))
+var.impact = apply(pca$rotation[,c(1:12)]^2 * pve.mat,1,sum)
+melt_var = melt(var.impact)
+
+ggplot(data = melt_var) +
+  geom_col(aes(x = reorder(rownames(melt_var),-value), y = value)) +
+  theme(axis.text.x = element_text(angle = 90)) + 
+  labs(x = "Variable", y = "Variable Importance")
+```
+
+Looks like the Perceived Usefulness (PU) scores contributed the most to the variance explained.
+
+
+### Train a classifier
+
+Set up test data by projecting points onto new axes.
+
+```{r}
+s.pca_test = scale(x = pca_test,center = pca$center)
+test_scores = s.pca_test %*% pca$rotation
+# Get  just important PCAs
+test_scores = test_scores[,c(1:12)]
+
+```
+
+
+#### Logistic Regression
+
+Set up the df with PCAs and binary variables and fit initial models.
+
+```{r}
+pca_df = scores[,1:12]
+## add back column variables
+wiki %>% select(binary_vars)%>% slice(trainIndex) %>% cbind(pca_df) -> train_df
+wiki %>% select(binary_vars) %>% slice(-trainIndex) %>% cbind(test_scores) -> test_df
+glm1 = glm(formula = Score ~ .,family = binomial,data = train_df)
+summary(glm1)
+```
+
+Now let's try refining the model by including only the significant predictors
+
+```{r}
+glm2 = glm(formula = Score ~ PC1 + PC2 + PC3 + PC4 + PC8,family = binomial,data = train_df)
+summary(glm2)
+```
+
+
+```{r}
+# Get predictions for test data
+glm2.probs = predict(glm2,newdata = test_df,type  = "response")
+glm2.pred = rep(0,nrow(test_df))
+glm2.pred[glm2.probs>.5]= 1
+conf_matrix = table(glm2.pred,test_df$Score)
+mean(glm2.pred==test_df$Score)
+conf_matrix
+sensitivity(conf_matrix)
+specificity(conf_matrix)
+```
+
+While accuracy was not bad. The specificity was a bit lower, but does not look like a bad classifier
+
+#### LDA
+
+
+```{r warning=FALSE}
+library(MASS)
+  
+lda.fit = lda(formula = Score~., data = train_df)
+
+
+# Testing
+lda.pred = predict(lda.fit,test_df)$class
+conf_lda = table(lda.pred,test_df$Score)
+mean(lda.pred==test_df$Score)
+conf_lda
+sensitivity(conf_lda)
+specificity(conf_lda)
+
+
+
+```
+
+
+Again, here accuracy is good. This looks like a better classifier than the logistic regression.
+
+
+#### QDA
+
+```{r}
+qda.fit = qda(Score~., data = train_df)
+```
+
+
+```{r}
+qda.pred = predict(qda.fit,test_df)$class
+
+conf_qda = table(qda.pred,test_df$Score)
+mean(qda.pred==test_df$Score)
+conf_qda
+sensitivity(conf_qda)
+specificity(conf_qda)
+```
+
+
+#### kNN
+
+```{r}
+library(class)
+
+train.X = subset(train_df, select = -c(Score)) %>% as.matrix()
+
+test.X = subset(test_df, select = -c(Score)) %>% as.matrix()
+
+knn.pred = knn(train = train.X, test = test.X, cl = train_df$Score,k = 1)
+
+mean(knn.pred == test_df$Score)
+
+knn_table = table(knn.pred,test_df$Score)
+knn_table
+
+sensitivity(knn_table)
+specificity(knn_table)
+```
+
+
+
+```{r}
+sens = c()
+spec = c()
+error = c()
+for (k in seq(1:10)) {
+  train.X = subset(train_df, select = -c(Score)) %>% as.matrix()
+
+  test.X = subset(test_df, select = -c(Score)) %>% as.matrix()
+
+  knn.pred = knn(train = train.X, test = test.X, cl = train_df$Score,k = k)
+
+  error = c(mean(knn.pred == test_df$Score),error)
+
+  knn_table = table(knn.pred,test_df$Score)
+  knn_table
+
+  sens = c(sensitivity(knn_table),sens)
+  spec = c(specificity(knn_table),spec)
+  
+}
+par(mfrow = c(1,3))
+plot(sens,type = "b",col = "red") + title("Sensitivity")
+plot(spec,type = "b",col = "blue") + title("Specificity")
+plot(error,type = "b", col = "green") + title("Accuracy")
+```
+
+Let's try *k=7*. It looks to have maximum or close to maximum values for each 
+
+```{r}
+
+train.X = subset(train_df, select = -c(Score)) %>% as.matrix()
+
+test.X = subset(test_df, select = -c(Score)) %>% as.matrix()
+
+knn.pred = knn(train = train.X, test = test.X, cl = train_df$Score,k = 7)
+
+mean(knn.pred == test_df$Score)
+
+knn_table = table(knn.pred,test_df$Score)
+knn_table
+
+sensitivity(knn_table)
+specificity(knn_table)
+
+```
+
+
+
+#### Model Comparison
+
+```{r}
+acc = c(mean(glm2.pred==test_df$Score), mean(lda.pred==test_df$Score),mean(qda.pred == test_df$Score), mean(knn.pred == test_df$Score))
+sens = sapply(list(conf_matrix,conf_lda,conf_qda,knn_table),sensitivity)
+spec = sapply(list(conf_matrix,conf_lda,conf_qda,knn_table),specificity)
+cbind(acc,sens,spec) %>% data.frame() %>% mutate(Model = c("GLM","LDA","QDA","k-NN")) -> model_eval
+
+par(mfrow=c(1,3))
+ggplot(model_eval,aes(x = Model,y = acc, fill = Model)) + geom_col() + theme(legend.position = "none") + 
+  labs(title = "Accuracy", y= "")
+ggplot(model_eval,aes(x = Model,y = acc, fill = Model)) + theme(legend.position = "none") + 
+  geom_col(aes(x = Model, y= sens)) + labs(title = "Sensitivity", y= "")
+ggplot(model_eval,aes(x = Model,y = spec, fill = Model)) + theme(legend.position = "none")+ geom_col(aes(x = Model, y= spec)) + 
+  labs(title = "Specificity",y="")
+```
+
+
+
+
+## Conclusion
+
+In conclusion, though the LDA model performed as one of the best when it came to accuracy, it also outperformed the other classifiers when it came to sensitivity and specificity making it the all-around better classifier. That being said, I would like to try cross-validation as a next step for this project just to make sure that this is the best classifier. In addition, as I mentioned earlier, it would be interesting to examine more advanced techniques of dealing with missing data. That includes examining patterns in the missingness to find out if the missing data is occuring at random and implementing imputation so we can keep more of our data. Finally, as I mentioned early, these classifiers are generatve. They don't look to find the differences among classes, but rather look to learn the characteristics of each class and chose the most likely one based on characteristics of the test point. Discriminative classifiers look to find differences and ways to separate classes based on their "predictors".
+
+
+
+
+
